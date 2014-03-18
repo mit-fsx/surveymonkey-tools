@@ -11,42 +11,67 @@ if StrictVersion(requests.__version__) < StrictVersion('1.1.0'):
     print >>sys.stderr, "For convenience, there is a copy in /mit/helpdesk/src"
     sys.exit(1)
 import json
+import logging
+import subprocess
 
 CONFIG_FILE="/afs/athena.mit.edu/astaff/project/helpdesk" \
     "/web_scripts/surveymonkey/private/config.json"
-
 STATE_FILE="/afs/athena.mit.edu/astaff/project/helpdesk" \
     "/cron_scripts/poll.state"
+LOG_FILE="/afs/athena.mit.edu/astaff/project/helpdesk" \
+    "/cron_scripts/debug.log"
 
 # What questions do we want
 QUESTIONS=['Name:', 'MIT email address:']
 # Survey title
 SURVEY_TITLE="Student Application and Technical Survey"
 
+logger = logging.getLogger('poll')
+debug_handler = logging.FileHandler(LOG_FILE)
+stderr_handler = logging.StreamHandler()
+stderr_handler.setLevel(logging.WARNING)
+logger.setLevel(logging.DEBUG)
+logger.addHandler(debug_handler)
+logger.addHandler(stderr_handler)
+
+logger.debug("**BEGIN** at %s", time.strftime("%Y-%m-%d %H:%M"))
 # Load the config file
 try:
     with open(CONFIG_FILE, 'r') as f:
         config = json.loads(f.read())
 except (ValueError, IOError) as e:
-    print "Content-type: text/plain\n"
-    print "Error reading config file: ", e
+    logger.exception("Exception while reading config file")
     sys.exit(0)
+
+def send_email(output):
+    tmpl = """To: {0}
+From: CS Hiring Survey Checker <devnull@mit.edu>
+Subject: New Technical Surveys
+"""
+    sendmail = subprocess.Popen(['/usr/sbin/sendmail', '-t'],
+                                stdin=subprocess.PIPE,
+                                stderr=subprocess.PIPE)
+    (_, err) = sendmail.communicate(tmpl.format(config['email_to']) + output)
+    if sendmail.returncode != 0:
+        logger.error("Failed to send mail: %s", err)
+        sys.exit(1)
 
 def make_request(client, method, data):
     url = "{0}/v2/surveys/{1}".format(config['api']['base'],
                                       method)
+    logger.debug("Making request to %s, data=%s", url, str(data))
     response = client.post(url, data=json.dumps(data))
     # TODO: Better avoidance of rate limiting
     time.sleep(0.3)
     try:
         response_json = response.json()
     except JSONDecodeError as e:
-        print "Unable to decode response as JSON"
-        print response
+        logger.exception("Unable to decode response as JSON")
+        logger.error("Response was: %s", response)
         sys.exit(1)
     if response_json['status'] != 0:
-        print "Request returned API status: ", response_json['status']
-        print method, data
+        logger.error("Request returned API status: %s", 
+                     response_json['status'])
         sys.exit(1)
     return response_json
 
@@ -61,6 +86,7 @@ def get_survey_id(client, title):
     surveys = survey_list['data']['surveys']
     assert len(surveys) < 2, "Multiple surveys returned!"
     if len(surveys) < 1:
+        logger.debug("No surveys found.")
         return None
     return surveys[0]['survey_id']
 
@@ -71,7 +97,8 @@ def get_question_ids(client, survey_id):
                    q['heading']) for q in questions if q['heading'] in QUESTIONS])
     missing = [q for q in QUESTIONS if q not in q_ids.values()]
     if len(missing):
-        print "Could not find questions on first page: {0}".format(missing)
+        logger.error("Could not find questions on first page: %s",
+                     missing)
         sys.exit(1)
     return q_ids
 
@@ -88,7 +115,7 @@ try:
     with open(config['token_file'], 'r') as f:
         token = f.read()
 except (IOError, KeyError) as e:
-    print "Failed to read token:", e
+    logger.exception("Failed to read token file")
     sys.exit(1)
 
 client = requests.session()
@@ -107,24 +134,28 @@ if os.path.exists(STATE_FILE):
                 (k,v) = l.strip().split('=', 1)
                 state_data[k] = v
     except IOError as e:
-        print "Failed to read state file", e
+        logger.exception("Failed to read state file")
         sys.exit(1)
 else:
+    logger.debug("State file does not exist, assuming past 7 days")
     state_data = {'date': time.strftime("%Y-%m-%d %H:%M:%S",
                                         time.localtime(time.time() - 604800))}
-with open(STATE_FILE, 'w') as f:
-    f.write("date={0}\n".format(time.strftime("%Y-%m-%d %H:%M:%S")))
+try:
+    with open(STATE_FILE, 'w') as f:
+        f.write("date={0}\n".format(time.strftime("%Y-%m-%d %H:%M:%S")))
+except IOError as e:
+    logger.exception("Failed to write state file")
+    sys.exit(1)
 
 # TODO: Cache this
 survey_id = get_survey_id(client, SURVEY_TITLE)
 if survey_id is None:
-    print "Failed to get survey id"
+    logger.error("Failed to get survey id")
     sys.exit(1)
 # TODO: Also cache this
 q_ids = get_question_ids(client, survey_id)
 respondents = {x['respondent_id']: x for x in get_respondents(client, survey_id, state_data['date'])}
-header = ['Technical Surveys completed since {0}:'.format(state_data['date'])]
-output = ''
+output = []
 if len(respondents.keys()):
     responses_json = get_survey_response(client, survey_id, respondents.keys())
     for x in responses_json['data']:
@@ -132,6 +163,9 @@ if len(respondents.keys()):
         data.update(respondents[x['respondent_id']])
         output.append("* {Name} ({MIT email address}) submitted a {status} survey on {date_modified}".format(**data))
 if len(output):
-    print "\n".join(output)
+    header = 'Surveys updated since {0}:'.format(state_data['date'])
+    output.insert(0, header)
+    send_email("\n".join(output))
 else:
-    print "No surveys"
+    logger.debug("No surveys")
+logger.debug("**END** at %s", time.strftime("%Y-%m-%d %H:%M"))
