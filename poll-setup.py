@@ -83,8 +83,11 @@ elif 'error' in formdata:
 print 'Content-type: text/html\n\n' \
     '<html><head><title>Survey Monkey Response Thingy</title></head>' \
     '<body>'
-print "This will let you log in to SurveyMonkey " \
-    "and initialize this application."
+print "<p>This will let you log in to SurveyMonkey " \
+    "and initialize this application.</p>"
+if os.path.exists(config['token_file']):
+    print '<p><strong>WARNING: </strong>Token file already exists.  It will ' \
+        'be overwritten.  Make sure this is what you want.</p>'
 print '<form name="login" method="post" action="{0}">'.format(
     os.getenv('SCRIPT_NAME'))
 print '<input type="submit" name="go" value="Continue"/>' \
