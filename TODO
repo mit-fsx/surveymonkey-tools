@@ -1,0 +1,6 @@
+
+- display 'single' 'open_ended' answers on same line as question,
+  using markup
+
+- check if subquestion is just '[a-z])' and display answer on 
+  same line
