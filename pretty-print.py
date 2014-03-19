@@ -1,51 +1,180 @@
 #!/usr/bin/python
 
-import sys
+import json
+import logging
 import os
-import copy
+import subprocess
+import sys
 import time
-from distutils.version import StrictVersion
-import requests
-from reportlab.lib import pagesizes
-from reportlab.lib.units import inch
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
-from reportlab.lib.styles import getSampleStyleSheet
-from xml.sax.saxutils import escape as xmlescape
+import re
 
+from distutils.version import StrictVersion
+from xml.sax import saxutils
+
+from reportlab.lib import pagesizes, styles, units, enums
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
+from reportlab.pdfbase.pdfmetrics import stringWidth
+import requests
+
+# Sanity checking
 if StrictVersion(requests.__version__) < StrictVersion('1.1.0'):
     print >>sys.stderr, "Version 1.1.0 of the 'requests' library is required."
     print >>sys.stderr, "For convenience, there is a copy in /mit/helpdesk/src"
     sys.exit(1)
-import json
-import logging
-import subprocess
+
+# Preferences for how things are rendered.
+# Page headings (in the survey) for which we skip question numbers,
+# and which allow toplevel "inline" formatted questions.
+page_render_prefs = { 'skip_question_numbers': ('Basic Information',),
+                      'allow_toplevel_inline': ('Basic Information',) }
+
+class Question:
+    """
+    Representing a question on a survey, possibly with sub-questions.
+    """
+    _formats = ('paragraph', 'inline', 'bullet', 'unformatted')
+
+    def __init__(self, heading, num=None):
+        self.num = num
+        self.heading = heading.strip()
+        self.format = 'paragraph'
+        self.subquestions = []
+        self.answers = []
+
+    def add_to_pdf(self, pdf, q_style='Question'):
+        assert self.format in self._formats, self.format
+        if self.format == 'unformatted':
+            pdf.add_paragraph(self._get_heading(), style=q_style)
+            pdf.add_paragraph(repr(self.answers), style='Error')
+        if self.format == 'inline':
+            answers = self._get_answers()
+            assert len(answers) == 1, "inline question has > 1 answers"
+            if pdf._will_fit_inline(self._get_heading(), 'Inline'+q_style):
+                pdf.add_paragraph(answers[0], style='Inline'+q_style,
+                                  bulletText=self._get_heading())
+            else:
+                self.format = 'paragraph'
+        if self.format == 'bullet':
+            pdf.add_paragraph(self._get_heading(), style=q_style)
+            for a in self._get_answers():
+                pdf.add_paragraph(a, style='Answer', bulletText=u"\u2022")
+        if self.format == 'paragraph':
+            pdf.add_paragraph(self._get_heading(), style=q_style)
+            if len(self.subquestions) > 0:
+                for q in self.subquestions:
+                    q.add_to_pdf(pdf, 'Subquestion')
+            else:
+                for a in self._get_answers():
+                    pdf.add_paragraph(a, style='Answer')
+
+    def _get_heading(self):
+        rv = u''
+        if self.num is not None:
+            rv += u'{0}. '.format(self.num)
+        return rv + self.heading
+
+    def _get_answers(self):
+        assert len(self.subquestions) == 0, "Answer has subquestions"
+        return [u'(no response)'] if len(self.answers) == 0 else self.answers
+
+    def add_subquestion(self, subquestion):
+        assert len(self.answers) == 0
+        if re.match(r'[a-z]\)\s*$', subquestion.heading):
+            subquestion.format = 'inline'
+        self.subquestions.append(subquestion)
+
+    def add_answer(self, answer):
+        assert len(self.subquestions) == 0
+        self.answers.append(answer)
+
+    def add_unformatted(self, q_type, answers):
+        assert len(self.subquestions) == 0
+        self.format = 'unformatted'
+        self.add_answer(
+            u"ERROR: CANNOT FORMAT {0}/{1} QUESTION".format(q_type['family'],
+                                                            q_type['subtype']))
+
+    def __repr__(self):
+        rv = u"Question({0})\n\tformat={1}\n".format(self.heading, self.format)
+        rv += u"\tAnswer: {0}\n".format(self.answers)
+        rv += u"\tSubquestions: {0}".format(repr(self.subquestions))
+        return rv.encode("utf-8")
+
+class StyleSheet(dict):
+    def __init__(self):
+        super(StyleSheet, self).__init__()
+        self['Normal'] = styles.ParagraphStyle('Normal', parent=None,
+                                               fontName='Helvetica',
+                                               fontSize=10, leading=12)
+        self['Title'] = styles.ParagraphStyle('Title', parent=self['Normal'],
+                                              alignment=enums.TA_CENTER,
+                                              fontName='Helvetica-Bold',
+                                              fontSize=18, leading=22,
+                                              spaceAfter=6)
+        self['Question'] = styles.ParagraphStyle('Question',
+                                                 parent=self['Normal'],
+                                                 fontName='Helvetica-Bold',
+                                                 fontSize=12, leading=12,
+                                                 spaceBefore=6, spaceAfter=4)
+        self['Subquestion'] = styles.ParagraphStyle('Subquestion',
+                                                    parent=self['Question'],
+                                                    fontName='Helvetica-Bold',
+                                                    fontSize=10,
+                                                    leftIndent=6,
+                                                    spaceBefore=4, spaceAfter=2)
+        self['Answer'] = styles.ParagraphStyle('Answer',
+                                               parent=self['Normal'],
+                                               fontName='Courier',
+                                               leftIndent=12,
+                                               bulletIndent=6)
+        self['Error'] = styles.ParagraphStyle('Error',
+                                              parent=self['Answer'],
+                                              backColor='yellow')
+        for sheet in ('Question', 'Subquestion'):
+            name = 'Inline' + sheet
+            self[name] = styles.ParagraphStyle(
+                name, parent=self[sheet],
+                bulletIndent=self[sheet].leftIndent,
+                bulletFontName=self[sheet].fontName,
+                bulletFontSize=self[sheet].fontSize,
+                leftIndent=(self[sheet].leftIndent *
+                            1.5) + self['Answer'].leftIndent,
+                fontName=self['Answer'].fontName)
+        for sheet in self.keys():
+            self[sheet+'Start'] = styles.ParagraphStyle(sheet+'Start',
+                                                        parent=self[sheet],
+                                                        spaceAfter=0)
+            self[sheet+'Mid'] = styles.ParagraphStyle(sheet+'Mid',
+                                                      parent=self[sheet],
+                                                      spaceBefore=0,
+                                                      spaceAfter=0)
+            self[sheet+'End'] = styles.ParagraphStyle(sheet+'End',
+                                                      parent=self[sheet],
+                                                      spaceBefore=0)
+
 
 class TechDiagnosticPDF(SimpleDocTemplate):
     meta_headings = { 'Name:': '_hdr_name',
                       'MIT email address:': '_hdr_email'
                       }
-    
+
     def __init__(self, filename):
         # Sigh.  SimpleDocTemplate is an old-style class
         SimpleDocTemplate.__init__(self, filename,
                                    pagesize=pagesizes.letter)
-        sample = getSampleStyleSheet()
-        self.stylesheet = dict()
-        self.stylesheet['Title'] = sample['Title']
-        self.stylesheet['Normal'] = sample['Normal']
-        for s in ('Question', 'SubQuestion', 'Answer'):
-            self.stylesheet[s] = copy.deepcopy(sample['Normal'])
-        self.stylesheet['Question'].fontName = 'Helvetica-Bold'
-        self.stylesheet['Question'].fontSize = 12
-        self.stylesheet['SubQuestion'].fontName = 'Helvetica-Bold'
-        self.stylesheet['SubQuestion'].fontSize = 10
-        self.stylesheet['Answer'].fontName = 'Courier'
+        self.stylesheet = StyleSheet()
         self._hdr_name = '<name>'
         self._hdr_email = '<email>'
         self._hdr_date = 'Printed: ' + time.strftime('%Y-%m-%d %H:%M')
-        self.current_page = None
+        self._cur_page_title = 'Untitled'
+        # This way we can use list indicies, since there's no Page 0
+        self._pages = [None]
         # Start with a Sapcer for the header on the first page
-        self.story = [Spacer(1, 0.75 * inch)]
+        self.story = [Spacer(1, 1.5 * units.inch)]
+        self.leftMargin = 0.5 * units.inch
+        self.rightMargin = self.leftMargin
+        self.topMargin = 0.5 * units.inch
+        self.bottomMargin = 0.75 * units.inch
         (self.page_w, self.page_h) = pagesizes.letter
 
     def _scoring_table(self, canvas, data, **kwargs):
@@ -53,8 +182,8 @@ class TechDiagnosticPDF(SimpleDocTemplate):
         col_width = kwargs.get('col_width', None)
         assert row_height is not None
         assert col_width is not None
-        x_offset = kwargs.get('x_offset', 0.5 * inch)
-        y_offset = kwargs.get('y_offset', 0.5 * inch)
+        x_offset = kwargs.get('x_offset', 0.5 * units.inch)
+        y_offset = kwargs.get('y_offset', 0.5 * units.inch)
         align = kwargs.get('align', 'left')
         n_rows = len(data)
         n_cols = max([len(x) for x in data])
@@ -71,19 +200,24 @@ class TechDiagnosticPDF(SimpleDocTemplate):
             for x,txt in zip(v_lines, row):
                 canvas.drawCentredString(x + (col_width * 0.5),
                                          h_lines[y] + 7.0, txt)
-        
 
-    def _header(self, canvas, foo):
+    def _will_fit_inline(self, txt, style):
+        sheet = self.stylesheet[style]
+        return stringWidth(
+            txt, sheet.bulletFontName,
+            sheet.bulletFontSize) <= (self.leftMargin + (self.page_w * 0.5))
+
+    def _header(self, canvas, _):
         # self.width and self.height are the dimensions of the area
         # inside the margins.
         canvas.saveState()
         canvas.setFont('Helvetica-Bold', 14)
         for row,txt in enumerate([self._hdr_name, self._hdr_email,
                                   self._hdr_date], start=1):
-            canvas.drawRightString(self.page_w - (0.5 * inch),
-                                   self.page_h - (0.45 * inch) - (row *
+            canvas.drawRightString(self.page_w - (0.5 * units.inch),
+                                   self.page_h - (0.45 * units.inch) - (row *
                                                                   0.25 *
-                                                                  inch),
+                                                                  units.inch),
                                    txt)
         table_data = [['Reader #', 'Initials', 'General', 'Mac', 'Win',
                        'Net', 'Athena', 'TOTAL'],
@@ -91,39 +225,61 @@ class TechDiagnosticPDF(SimpleDocTemplate):
                       ['2']]
         canvas.setLineWidth(0.1)
         self._scoring_table(canvas, table_data,
-                            row_height = 0.25 * inch,
-                            col_width = 0.5 * inch)
+                            row_height = 0.25 * units.inch,
+                            col_width = 0.5 * units.inch)
+        canvas.restoreState()
+
+    def _footer(self, canvas, _):
+        canvas.saveState()
+        canvas.setFont('Helvetica', 10)
+        canvas.drawRightString(self.page_w - (0.75 * units.inch),
+                               0.5 * units.inch,
+                               u'"{0}" score: '.format(self._pages[self.page]))
+        canvas.line(self.page_w - (0.75 * units.inch),
+                    0.5 * units.inch,
+                    self.page_w - (0.5 * units.inch),
+                    0.5 * units.inch)
+
+        canvas.drawString(0.5 * units.inch,
+                          0.5 * units.inch,
+                          'Page {0}'.format(self.page))
         canvas.restoreState()
 
     def add_page_title(self, text):
-        self.current_section = text
-        self.add_paragraph(text, 'Title')
+        self._cur_page_title = text
+        self.add_paragraph(text, style='Title')
 
-    def add_question(self, text):
-        self.add_paragraph(text, 'Question')
+    def add_question(self, question):
+        if question.heading in self.meta_headings:
+            setattr(self, self.meta_headings[question.heading],
+                    question.answers[0])
+        question.add_to_pdf(self)
 
-    def add_subquestion(self, text):
-        self.add_paragraph(text, 'SubQuestion')
-
-    def add_answer(self, text):
-        self.add_paragraph(text, 'Answer')
-
-    def add_paragraph(self, text, style='Normal'):
-        # Paragraph secretly converts to XML without escaping.
-        # Because why not
-        text = xmlescape(text)
-        p = Paragraph(text, self.stylesheet[style])
-        self.story.append(p)
+    def add_paragraph(self, text, **kwargs):
+        # Paragraph class takes XML for formatting, so
+        # we must escape our unformatted text
+        if not kwargs.pop('xml', False):
+            text = saxutils.escape(text)
+        style = kwargs.pop('style', 'Normal')
+        # Deal with questions which have newlines in them.
+        # SurveyMonkey renders these with linebreaks, so
+        # we expect to see them.
+        paragraphs = text.split('\r\n')
+        for txt,style in zip(paragraphs,
+                             [style + x for x in
+                              ['Start' if len(paragraphs) > 1 else ''] +
+                              ['Mid'] * (len(paragraphs) - 2) + ['End']
+                              ]):
+            self.story.append(Paragraph(txt, self.stylesheet[style], **kwargs))
 
     def add_page_break(self):
+        self._pages.append(self._cur_page_title)
         self.story.append(PageBreak())
 
-    def check_and_set_metadata(self, heading, value):
-        if heading in self.meta_headings:
-            setattr(self, self.meta_headings[heading], value)
-
-    def go(self):
-        self.build(self.story, onFirstPage=self._header)
+    def save(self):
+        self.build(self.story,
+                   onFirstPage=self._header,
+                   onLaterPages=self._footer)
 
 
 CONFIG_FILE="/afs/athena.mit.edu/astaff/project/helpdesk" \
@@ -163,7 +319,7 @@ def make_request(client, method, data):
         logger.error("Response was: %s", response)
         sys.exit(1)
     if response_json['status'] != 0:
-        logger.error("Request returned API status: %s", 
+        logger.error("Request returned API status: %s",
                      response_json['status'])
         sys.exit(1)
     return response_json['data']
@@ -225,53 +381,60 @@ responses = get_survey_responses(client, survey_id, respondent_id)
 pdf = TechDiagnosticPDF("output.pdf")
 pdf.title = title
 
-# print
-#print title
 for page in pages:
     # Skip pages with no questions (e.g. informational)
     if len(page['questions']) == 0:
         continue
-    # Whee, Unicode
     pdf.add_page_title(page['heading'])
+    # 'presentation' questions have no response, remove them
+    questions = [x for x in page['questions']
+                 if x['type']['family'] != 'presentation']
     # Should already be sorted, but...
-    # 'presentation' questions have no response
-    for q in sorted([x for x in page['questions'] if x['type']['family'] != 'presentation'], key=lambda x: x['position']):
-        heading = q['heading']
-        pdf.add_question(u"{0}: {1}".format(q['position'], heading))
-        result = "(no response)"
+    for n, q in enumerate(sorted(questions,
+                                 key=lambda x: x['position']),
+                          start=1):
+        if page['heading'] in page_render_prefs['skip_question_numbers']:
+            n=None
+        question = Question(q['heading'], n)
         if q['question_id'] in responses:
             answers = responses[q['question_id']]
             if q['type']['family'] == 'open_ended':
                 if q['type']['subtype'] == 'multi':
                     for answer_heading in sorted([x for x in q['answers']],
                                                  key=lambda x: x['position']):
-                        pdf.add_subquestion(answer_heading['text'])
+                        subquestion = Question(answer_heading['text'])
+                        subquestion.format = 'inline'
                         answer = [a for a in answers
                                   if a['row'] == answer_heading['answer_id']]
                         assert len(answer) < 2
-                        if len(answer) == 0:
-                            pdf.add_answer('(no response)')
-                        else:
-                            pdf.add_answer(answer[0]['text'])
+                        if len(answer) == 1:
+                            subquestion.add_answer(answer[0]['text'])
+                        question.add_subquestion(subquestion)
                 elif q['type']['subtype'] in ('essay', 'single'):
                     assert len(answers) == 1
                     assert answers[0]['row'] == '0'
-                    result = answers[0]['text']
-                    pdf.add_answer(answers[0]['text'])
+                    question.add_answer(answers[0]['text'])
+                    if (page['heading'] in
+                        page_render_prefs['allow_toplevel_inline']) \
+                        and (q['type']['subtype'] == 'single'):
+                        question.format = 'inline'
                 else:
-                    pdf.add_answer('<UNABLE TO RENDER ANSWER>')
+                    question.add_unformatted(q['type'], answers)
             else:
                 for ans in answers:
-                    rows = [a for a in q['answers'] if a['answer_id'] == ans['row']]
+                    rows = [a for a in q['answers']
+                            if a['answer_id'] == ans['row']]
                     assert len(rows) == 1
+                    if q['type']['family'] == 'multiple_choice':
+                        question.format = 'bullet'
                     if rows[0]['type'] == 'other':
-                        pdf.add_answer(u'{0}: {1}'.format(rows[0]['text'],
-                                                          ans['text']))
+                        question.add_answer(u'{0}: {1}'.format(rows[0]['text'],
+                                                               ans['text']))
                     elif rows[0]['type'] == 'row':
-                        pdf.add_answer(rows[0]['text'])
+                        question.add_answer(rows[0]['text'])
                     else:
-                        pdf.add_answer('<UNABLE TO RENDER ANSWER>')
-        pdf.check_and_set_metadata(heading, result)
+                        question.add_unformatted(q['type'], answer)
+        pdf.add_question(question)
     pdf.add_page_break()
 
-pdf.go()
+pdf.save()
