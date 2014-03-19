@@ -1,5 +1,6 @@
 #!/usr/bin/python
 
-from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 
-print getSampleStyleSheet().list()
+print getSampleStyleSheet()['Title'].listAttrs()
+

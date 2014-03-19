@@ -169,12 +169,14 @@ class TechDiagnosticPDF(SimpleDocTemplate):
         self._cur_page_title = 'Untitled'
         # This way we can use list indicies, since there's no Page 0
         self._pages = [None]
-        # Start with a Sapcer for the header on the first page
+        # Start with a Spacer for the header on the first page
         self.story = [Spacer(1, 1.5 * units.inch)]
         self.leftMargin = 0.5 * units.inch
         self.rightMargin = self.leftMargin
         self.topMargin = 0.5 * units.inch
         self.bottomMargin = 0.75 * units.inch
+        # Record the width and height now, because in the build stage
+        # width and height are set to the area inside the margins
         (self.page_w, self.page_h) = pagesizes.letter
 
     def _scoring_table(self, canvas, data, **kwargs):
@@ -281,15 +283,7 @@ class TechDiagnosticPDF(SimpleDocTemplate):
                    onFirstPage=self._header,
                    onLaterPages=self._footer)
 
-
-CONFIG_FILE="/afs/athena.mit.edu/astaff/project/helpdesk" \
-    "/web_scripts/surveymonkey/private/config.json"
-STATE_FILE="/afs/athena.mit.edu/astaff/project/helpdesk" \
-    "/cron_scripts/poll.state"
 LOG_FILE="debug.log"
-
-# Survey title
-SURVEY_TITLE="Student Application and Technical Survey"
 
 logger = logging.getLogger('grader')
 #debug_handler = logging.FileHandler(LOG_FILE)
