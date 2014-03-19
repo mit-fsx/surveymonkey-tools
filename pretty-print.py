@@ -2,10 +2,10 @@
 
 import sys
 import os
+import copy
 import time
 from distutils.version import StrictVersion
 import requests
-#from reportlab.pdfgen import canvas
 from reportlab.lib import pagesizes
 from reportlab.lib.units import inch
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
@@ -21,70 +21,109 @@ import logging
 import subprocess
 
 class TechDiagnosticPDF(SimpleDocTemplate):
+    meta_headings = { 'Name:': '_hdr_name',
+                      'MIT email address:': '_hdr_email'
+                      }
+    
     def __init__(self, filename):
         # Sigh.  SimpleDocTemplate is an old-style class
         SimpleDocTemplate.__init__(self, filename,
                                    pagesize=pagesizes.letter)
-        self.style = getSampleStyleSheet()["Normal"]
-        self.title = ''
-        self.story = []
+        sample = getSampleStyleSheet()
+        self.stylesheet = dict()
+        self.stylesheet['Title'] = sample['Title']
+        self.stylesheet['Normal'] = sample['Normal']
+        for s in ('Question', 'SubQuestion', 'Answer'):
+            self.stylesheet[s] = copy.deepcopy(sample['Normal'])
+        self.stylesheet['Question'].fontName = 'Helvetica-Bold'
+        self.stylesheet['Question'].fontSize = 12
+        self.stylesheet['SubQuestion'].fontName = 'Helvetica-Bold'
+        self.stylesheet['SubQuestion'].fontSize = 10
+        self.stylesheet['Answer'].fontName = 'Courier'
+        self._hdr_name = '<name>'
+        self._hdr_email = '<email>'
+        self._hdr_date = 'Printed: ' + time.strftime('%Y-%m-%d %H:%M')
+        self.current_page = None
+        # Start with a Sapcer for the header on the first page
+        self.story = [Spacer(1, 0.75 * inch)]
         (self.page_w, self.page_h) = pagesizes.letter
 
-    def _table_dimensions(self, n_rows, n_cols,
-                          row_size, col_size, x_offset, y_offset):
-#        h_center = self.page_w/2.0
-#        v_lines = [h_center + (col_size * x) for x in range(-1 * n_cols / 2,
-#                                                             (n_cols / 2) + 1)]
-        v_lines = [self.page_w - x_offset - (col_size * x) for x in range(0, n_cols +1)]
-
-        h_lines = [(self.page_h - y_offset - (row_size * x)) for x in range(0, n_rows + 1)]
-        return (v_lines, h_lines)
+    def _scoring_table(self, canvas, data, **kwargs):
+        row_height = kwargs.get('row_height', None)
+        col_width = kwargs.get('col_width', None)
+        assert row_height is not None
+        assert col_width is not None
+        x_offset = kwargs.get('x_offset', 0.5 * inch)
+        y_offset = kwargs.get('y_offset', 0.5 * inch)
+        align = kwargs.get('align', 'left')
+        n_rows = len(data)
+        n_cols = max([len(x) for x in data])
+        rng = range(0, n_cols +1)
+        if align == 'right':
+            rng = range(-1 * n_cols, 1)
+            x_offset = self.page_w - x_offset
+        v_lines = [x_offset + (col_width * x) for x in rng]
+        h_lines = [(self.page_h - y_offset -
+                    (row_height * x)) for x in range(0, n_rows + 1)]
+        canvas.grid(v_lines, h_lines)
+        canvas.setFont('Helvetica', 8)
+        for y, row in enumerate(data, start=1):
+            for x,txt in zip(v_lines, row):
+                canvas.drawCentredString(x + (col_width * 0.5),
+                                         h_lines[y] + 7.0, txt)
         
 
-    def header(self, canvas, foo):
+    def _header(self, canvas, foo):
         # self.width and self.height are the dimensions of the area
         # inside the margins.
         canvas.saveState()
-        canvas.drawString(self.page_w, self.page_h, 'a')
-        canvas.drawString(0.0, self.page_h, 'a')
         canvas.setFont('Helvetica-Bold', 14)
-        canvas.drawString(0.5 * inch, self.page_h - inch,
-                          self.title)
+        for row,txt in enumerate([self._hdr_name, self._hdr_email,
+                                  self._hdr_date], start=1):
+            canvas.drawRightString(self.page_w - (0.5 * inch),
+                                   self.page_h - (0.45 * inch) - (row *
+                                                                  0.25 *
+                                                                  inch),
+                                   txt)
+        table_data = [['Reader #', 'Initials', 'General', 'Mac', 'Win',
+                       'Net', 'Athena', 'TOTAL'],
+                      ['1'],
+                      ['2']]
         canvas.setLineWidth(0.1)
-        col_size = 0.5 * inch
-        row_size = 0.25 * inch
-        offset = 0.5 * inch
-        table_dimensions = self._table_dimensions(3, 8, row_size, col_size,
-                                                  offset, offset)
-        canvas.setFont('Helvetica', 8)
-        col_headings = ['Reader #', 'Initials', 'General', 'Mac', 'Win',
-                        'Net', 'Athena', 'TOTAL']
-        for x,txt in zip(reversed(table_dimensions[0]), col_headings):
-            canvas.drawCentredString(x + (col_size * 0.5),
-                                     table_dimensions[1][1] + 7.0, txt)
-        for i,y in enumerate(table_dimensions[1][2:], start=1):
-            canvas.drawCentredString(table_dimensions[0][-1] + (0.5 * col_size),
-                                     y + 7.0, 
-                                     str(i))
-        canvas.grid(*table_dimensions)
+        self._scoring_table(canvas, table_data,
+                            row_height = 0.25 * inch,
+                            col_width = 0.5 * inch)
         canvas.restoreState()
 
-    def add_heading(self, text):
-        self.add_paragraph(text)
+    def add_page_title(self, text):
+        self.current_section = text
+        self.add_paragraph(text, 'Title')
 
-    def add_paragraph(self, text):
+    def add_question(self, text):
+        self.add_paragraph(text, 'Question')
+
+    def add_subquestion(self, text):
+        self.add_paragraph(text, 'SubQuestion')
+
+    def add_answer(self, text):
+        self.add_paragraph(text, 'Answer')
+
+    def add_paragraph(self, text, style='Normal'):
         # Paragraph secretly converts to XML without escaping.
         # Because why not
         text = xmlescape(text)
-        p = Paragraph(text, self.style)
+        p = Paragraph(text, self.stylesheet[style])
         self.story.append(p)
-#        self.story.append(Spacer(1, 0.2*inch))
 
     def add_page_break(self):
         self.story.append(PageBreak())
 
+    def check_and_set_metadata(self, heading, value):
+        if heading in self.meta_headings:
+            setattr(self, self.meta_headings[heading], value)
+
     def go(self):
-        self.build(self.story, onFirstPage=self.header)
+        self.build(self.story, onFirstPage=self._header)
 
 
 CONFIG_FILE="/afs/athena.mit.edu/astaff/project/helpdesk" \
@@ -193,29 +232,46 @@ for page in pages:
     if len(page['questions']) == 0:
         continue
     # Whee, Unicode
-    pdf.add_heading(page['heading'])
+    pdf.add_page_title(page['heading'])
     # Should already be sorted, but...
     # 'presentation' questions have no response
     for q in sorted([x for x in page['questions'] if x['type']['family'] != 'presentation'], key=lambda x: x['position']):
-        pdf.add_paragraph(u"{0}".format(q['heading']))
+        heading = q['heading']
+        pdf.add_question(u"{0}: {1}".format(q['position'], heading))
         result = "(no response)"
         if q['question_id'] in responses:
-            for answer in responses[q['question_id']]:
-                assert u'row' in answer
-                # row=0 for single freeform answers
-                text = answer.get(u'text', None)
-                result = text
-                if answer['row'] != u'0':
-                    rows = [a for a in q['answers'] if a['answer_id'] == answer['row']]
+            answers = responses[q['question_id']]
+            if q['type']['family'] == 'open_ended':
+                if q['type']['subtype'] == 'multi':
+                    for answer_heading in sorted([x for x in q['answers']],
+                                                 key=lambda x: x['position']):
+                        pdf.add_subquestion(answer_heading['text'])
+                        answer = [a for a in answers
+                                  if a['row'] == answer_heading['answer_id']]
+                        assert len(answer) < 2
+                        if len(answer) == 0:
+                            pdf.add_answer('(no response)')
+                        else:
+                            pdf.add_answer(answer[0]['text'])
+                elif q['type']['subtype'] in ('essay', 'single'):
+                    assert len(answers) == 1
+                    assert answers[0]['row'] == '0'
+                    result = answers[0]['text']
+                    pdf.add_answer(answers[0]['text'])
+                else:
+                    pdf.add_answer('<UNABLE TO RENDER ANSWER>')
+            else:
+                for ans in answers:
+                    rows = [a for a in q['answers'] if a['answer_id'] == ans['row']]
                     assert len(rows) == 1
                     if rows[0]['type'] == 'other':
-                        result = '{0}: {1}'.format(rows[0]['text'],
-                                                   text)
-                    elif text is not None:
-                        result = u" {0}\n    {1}".format(rows[0]['text'],
-                                                         text)
+                        pdf.add_answer(u'{0}: {1}'.format(rows[0]['text'],
+                                                          ans['text']))
+                    elif rows[0]['type'] == 'row':
+                        pdf.add_answer(rows[0]['text'])
                     else:
-                        result = rows[0]['text']
-        pdf.add_paragraph(result)
+                        pdf.add_answer('<UNABLE TO RENDER ANSWER>')
+        pdf.check_and_set_metadata(heading, result)
+    pdf.add_page_break()
 
 pdf.go()
