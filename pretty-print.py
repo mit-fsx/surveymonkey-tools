@@ -5,6 +5,12 @@ import os
 import time
 from distutils.version import StrictVersion
 import requests
+#from reportlab.pdfgen import canvas
+from reportlab.lib import pagesizes
+from reportlab.lib.units import inch
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
+from reportlab.lib.styles import getSampleStyleSheet
+from xml.sax.saxutils import escape as xmlescape
 
 if StrictVersion(requests.__version__) < StrictVersion('1.1.0'):
     print >>sys.stderr, "Version 1.1.0 of the 'requests' library is required."
@@ -13,6 +19,73 @@ if StrictVersion(requests.__version__) < StrictVersion('1.1.0'):
 import json
 import logging
 import subprocess
+
+class TechDiagnosticPDF(SimpleDocTemplate):
+    def __init__(self, filename):
+        # Sigh.  SimpleDocTemplate is an old-style class
+        SimpleDocTemplate.__init__(self, filename,
+                                   pagesize=pagesizes.letter)
+        self.style = getSampleStyleSheet()["Normal"]
+        self.title = ''
+        self.story = []
+        (self.page_w, self.page_h) = pagesizes.letter
+
+    def _table_dimensions(self, n_rows, n_cols,
+                          row_size, col_size, x_offset, y_offset):
+#        h_center = self.page_w/2.0
+#        v_lines = [h_center + (col_size * x) for x in range(-1 * n_cols / 2,
+#                                                             (n_cols / 2) + 1)]
+        v_lines = [self.page_w - x_offset - (col_size * x) for x in range(0, n_cols +1)]
+
+        h_lines = [(self.page_h - y_offset - (row_size * x)) for x in range(0, n_rows + 1)]
+        return (v_lines, h_lines)
+        
+
+    def header(self, canvas, foo):
+        # self.width and self.height are the dimensions of the area
+        # inside the margins.
+        canvas.saveState()
+        canvas.drawString(self.page_w, self.page_h, 'a')
+        canvas.drawString(0.0, self.page_h, 'a')
+        canvas.setFont('Helvetica-Bold', 14)
+        canvas.drawString(0.5 * inch, self.page_h - inch,
+                          self.title)
+        canvas.setLineWidth(0.1)
+        col_size = 0.5 * inch
+        row_size = 0.25 * inch
+        offset = 0.5 * inch
+        table_dimensions = self._table_dimensions(3, 8, row_size, col_size,
+                                                  offset, offset)
+        canvas.setFont('Helvetica', 8)
+        col_headings = ['Reader #', 'Initials', 'General', 'Mac', 'Win',
+                        'Net', 'Athena', 'TOTAL']
+        for x,txt in zip(reversed(table_dimensions[0]), col_headings):
+            canvas.drawCentredString(x + (col_size * 0.5),
+                                     table_dimensions[1][1] + 7.0, txt)
+        for i,y in enumerate(table_dimensions[1][2:], start=1):
+            canvas.drawCentredString(table_dimensions[0][-1] + (0.5 * col_size),
+                                     y + 7.0, 
+                                     str(i))
+        canvas.grid(*table_dimensions)
+        canvas.restoreState()
+
+    def add_heading(self, text):
+        self.add_paragraph(text)
+
+    def add_paragraph(self, text):
+        # Paragraph secretly converts to XML without escaping.
+        # Because why not
+        text = xmlescape(text)
+        p = Paragraph(text, self.style)
+        self.story.append(p)
+#        self.story.append(Spacer(1, 0.2*inch))
+
+    def add_page_break(self):
+        self.story.append(PageBreak())
+
+    def go(self):
+        self.build(self.story, onFirstPage=self.header)
+
 
 CONFIG_FILE="/afs/athena.mit.edu/astaff/project/helpdesk" \
     "/web_scripts/surveymonkey/private/config.json"
@@ -110,21 +183,23 @@ respondent_id='2799054163'
 (title, pages) = get_survey_questions(client, survey_id)
 responses = get_survey_responses(client, survey_id, respondent_id)
 
+pdf = TechDiagnosticPDF("output.pdf")
+pdf.title = title
+
 # print
-print title
+#print title
 for page in pages:
     # Skip pages with no questions (e.g. informational)
     if len(page['questions']) == 0:
         continue
     # Whee, Unicode
-    print page['heading'].center(72)
+    pdf.add_heading(page['heading'])
     # Should already be sorted, but...
     # 'presentation' questions have no response
     for q in sorted([x for x in page['questions'] if x['type']['family'] != 'presentation'], key=lambda x: x['position']):
-        print u"{0}".format(q['heading'])
-        if q['question_id'] not in responses:
-            print "(no response)"
-        else:
+        pdf.add_paragraph(u"{0}".format(q['heading']))
+        result = "(no response)"
+        if q['question_id'] in responses:
             for answer in responses[q['question_id']]:
                 assert u'row' in answer
                 # row=0 for single freeform answers
@@ -141,6 +216,6 @@ for page in pages:
                                                          text)
                     else:
                         result = rows[0]['text']
-                print result
-            
-        print "---------------------------"
+        pdf.add_paragraph(result)
+
+pdf.go()
