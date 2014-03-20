@@ -60,13 +60,87 @@ class Config(Struct):
                              object_hook=Config)
         return obj
 
-class SurveyDetails(Struct):
+class SurveyList(Struct):
     def __init__(self, *args):
         Struct.__init__(self, *args)
-        self.pages = [SurveyPage(p) for p in self.pages]
+        self.surveys = [SurveyInfo(s) for s in self.surveys]
+        self.pages=[self.page]
+
+    def __getitem__(self, key):
+        return self.surveys[key]
+
+    def __len__(self):
+        return len(self.surveys)
+
+    def __iter__(self):
+        return iter(self.surveys)
+
+    def add_page(self, page):
+        self.surveys += [SurveyInfo(s) for s in page.surveys]
+        self.pages.append(page.page)
+
+class RespondentList(Struct):
+    def __init__(self, *args):
+        Struct.__init__(self, *args)
+        self.respondents = [RespondentInfo(r) for r in self.respondents]
+        self.pages=[self.page]
+
+    def __getitem__(self, key):
+        return self.respondents[key]
+
+    def __len__(self):
+        return len(self.respondents)
+
+    def __iter__(self):
+        return iter(self.respondents)
+
+    def add_page(self, page):
+        self.respondents += [RespondentInfo(r) for r in page.respondents]
+        self.pages.append(page.page)
+
+class RespondentInfo(Struct):
+    _fields = ('date_start', 'date_modified', 'collector_id', 'collection_mode',
+               'custom_id', 'email', 'first_name', 'last_name', 'ip_address',
+               'status', 'analysis_url')
+
+    def __init__(self, *args):
+        Struct.__init__(self, *args)
+
+    def __getattr__(self, name):
+        if name in self.__dict__:
+            return self.__dict__[name]
+        elif name in self._fields:
+            raise SurveyMonkeyError('{0} field not initialized.'.format(name))
+        else:
+            raise AttributeError(
+                "RespondentInfo instance has no attribute '{0}'".format(name))
+
+class SurveyInfo(Struct):
+    _fields = ('title', 'analysis_url', 'date_created', 'date_modified',
+               'language_id', 'question_count', 'num_responses')
+
+    def __init__(self, *args):
+        Struct.__init__(self, *args)
+
+    def __getattr__(self, name):
+        if name in self.__dict__:
+            return self.__dict__[name]
+        elif name in self._fields:
+            raise SurveyMonkeyError('{0} field not initialized.'.format(name))
+        else:
+            raise AttributeError(
+                "SurveyInfo instance has no attribute '{0}'".format(name))
 
     def get_title(self):
-        return self.title.text
+        if isinstance(self.title, Struct):
+            return self.title.text
+        else:
+            return self.title
+
+class SurveyDetails(SurveyInfo):
+    def __init__(self, *args):
+        SurveyInfo.__init__(self, *args)
+        self.pages = [SurveyPage(p) for p in self.pages]
 
     def get_questions_by_heading(self, *headings):
         rv = []
@@ -291,13 +365,18 @@ class SurveyMonkey:
         self.client.params = {
             "api_key": api_key
             }
-        
+
     def make_request(self, method, data):
         url = "{0}/v2/surveys/{1}".format(self.base_uri, method)
         logger.debug("Making request to %s, data=%s", url, str(data))
         response = self.client.post(url, data=json.dumps(data))
         # TODO: Better avoidance of rate limiting
-        time.sleep(0.3)
+        time.sleep(0.1)
+        if not response:
+            raise SurveyMonkeyError('Bad response: ' + repr(response))
+            logger.error("Response code: {0} text: {1}".format(
+                    response.status_code, response.text)
+            response.raise_for_status()
         try:
             # response_json = response.json(object_hook=Struct)
             # TODO: Hack until we have requests 1.2
@@ -312,7 +391,7 @@ class SurveyMonkey:
         except AttributeError:
             raise SurveyMonkeyError("JSON did not contain 'status'!")
         if status != 0:
-            raise SurveyMonkeyError(self._status_codes[response_json['status']])
+            raise SurveyMonkeyError(self._status_codes[response_json.status])
         return response_json.data
 
     def get_survey_details(self, survey_id):
@@ -326,20 +405,45 @@ class SurveyMonkey:
         return {r.respondent_id: SurveyResponse(r) for r in
                 self.make_request('get_responses', postdata)}
 
+    def get_survey_list(self, fields=SurveyInfo._fields, **kwargs):
+        postdata={'fields': fields}
+        for arg, val in [(k, kwargs.get(k, None)) for k in
+                         'page_size', 'page',
+                         'start_date', 'end_date', 'title',
+                         'recipient_email', 'order_asc']:
+            if val is not None:
+                postdata[arg] = val
+        max_pages=kwargs.get('max_pages', 0 if 'page' in postdata else 10)
+        s_list = SurveyList(self.make_request('get_survey_list',
+                                              postdata))
+        for _ in xrange(max_pages - 1):
+            postdata['page'] = s_list.pages[-1] + 1
+            next_page = self.make_request('get_survey_list',
+                                          postdata)
+            if len(next_page.surveys) == 0:
+                break
+            s_list.add_page(next_page)
+        return s_list
 
-# foo = Config.load()
-# sm = SurveyMonkey(foo.get_token(),
-#                   foo.app.api_key,
-#                   foo.api.base)
-
-# response = sm.get_survey_responses('20816427', '2799054163').values()[0]
-
-# for page in sm.get_survey_questions('20816427').pages:
-#     for i in page.questions:
-# #        print i.heading
-#         print response.get_response_for_question(i)
-#         print "---"
-#     print "-------------------------------------------------"
-#     print "-------------------------------------------------"
-#     print "-------------------------------------------------"
-
+    def get_survey_respondents(self, survey_id,
+                               fields=RespondentInfo._fields, **kwargs):
+        postdata={'survey_id': survey_id,
+                  'fields': fields}
+        for arg, val in [(k, kwargs.get(k, None)) for k in
+                         'page_size', 'page',
+                         'collector_id', 'start_date', 'end_date',
+                         'start_modified_date', 'end_modified_date',
+                         'order_by', 'order_asc']:
+            if val is not None:
+                postdata[arg] = val
+        max_pages=kwargs.get('max_pages', 0 if 'page' in postdata else 10)
+        r_list = RespondentList(self.make_request('get_respondent_list',
+                                                  postdata))
+        for _ in xrange(max_pages - 1):
+            postdata['page'] = r_list.pages[-1] + 1
+            next_page = self.make_request('get_respondent_list',
+                                          postdata)
+            if len(next_page.respondents) == 0:
+                break
+            r_list.add_page(next_page)
+        return r_list
