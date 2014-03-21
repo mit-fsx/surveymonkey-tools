@@ -4,6 +4,7 @@ Python module for surveymonkey API
 
 import json
 import logging
+import pprint
 import sys
 import time
 import re
@@ -26,12 +27,10 @@ class Struct:
         else:
             self.__dict__.update(dct_or_struct)
 
-    def _repr_contents(self):
-        return u','.join(self.__dict__.keys())
-
     def __repr__(self):
-        return "{0}({1})".format(self.__class__.__name__,
-                                 self._repr_contents())
+        return u"{0}({1})".format(
+            self.__class__.__name__,
+            repr(self.__dict__)).encode('utf-8')
 
 class Config(Struct):
     """
@@ -196,8 +195,14 @@ class SurveyQuestion(Struct):
                 raise SurveyMonkeyError(
                     "Unexpected set of answers for question {0}".format(
                         self.question_id))
-    def answerable(self):
-        return self.type.family != 'presentation'
+
+    def __repr__(self):
+        return "SurveyQuestion(#{0},{1},id={2})\n  {3}{4}".format(
+            self.position,
+            self.type,
+            self.question_id,
+            '(no answers)' if len(self.answers) == 0 else '',
+            '\n  '.join([repr(x) for x in self.answers]))
 
     def __contains__(self, answer_id):
         return answer_id in self._answer_idx
@@ -205,20 +210,32 @@ class SurveyQuestion(Struct):
     def __getitem__(self, answer_id):
         return self._answer_idx[answer_id]
 
+    def answerable(self):
+        return self.type.family != 'presentation'
+
 class SurveyQuestionType(Struct):
     def __cmp__(self, other):
-        compare = other
-        if isinstance(other, SurveyQuestionType):
-            compare = other._repr_contents()
-        elif not isinstance(other, str):
+        if not isinstance(other, (str, SurveyQuestionType)):
             raise TypeError("Cannot compare with {0}".format(type(other)))
-        return cmp(compare, self._repr_contents())
+        return cmp(repr(other), repr(self))
 
-    def _repr_contents(self):
-        return "{0}/{1}".format(self.family, self.subtype)
+    def __repr__(self):
+        return "'{0}/{1}'".format(self.family, self.subtype)
 
 class SurveyAnswer(Struct):
-    pass
+    def __repr__(self):
+        return "SurveyAnswer({0}{1},{2},{3},\"{4}\",{5})".format(
+            '#{0}'.format(self.__dict__.get('position', None)),
+            '(hidden)' if not self.visible else '',
+            self.answer_id,
+            self.type,
+            self.text,
+            [str(x) for x in self.__dict__.keys() if x not in ('answer_id',
+                                                               'type',
+                                                               'text',
+                                                               'visible',
+                                                               'position',
+                                                               )])
 
 class SurveyResponse(Struct):
     def __init__(self, *args):
@@ -245,30 +262,36 @@ class SurveyQuestionResponse(Struct):
         assert row != '0'
         return self._answer_idx[row].text if row in self._answer_idx else None
 
-    def get(self, question):
-        rv = []
-        if question.type.family == 'open_ended':
-            if question.type.subtype == 'multi':
-                for subanswer in sorted(question.answers,
-                                        key=lambda x: x.position):
-                    rv.append((subanswer.text,
-                              self[subanswer.answer_id]))
-            elif question.type.subtype in ('essay', 'single'):
-                assert len(self.answers) == 1
-                assert self.answers[0].row == '0'
-                rv.append(self.answers[0].text)
-            else:
-                raise Exception('Unformattable answer')
-        else:
-            for ans in self.answers:
-                answer = question[ans.row]
-                if answer.type == 'other':
-                    rv.append("{0}: {1}".format(answer.text, ans.text))
-                elif answer.type == 'row':
-                    rv.append(answer.text)
-                else:
-                    raise Exception('Unformattable answer')
-        return rv
+    def __repr__(self):
+        return "SurveyQuestionResponse(q_id={0}, {1} answers)\n  {2}".format(
+            self.question_id,
+            len(self.answers),
+            '\n  '.join([repr(x) for x in self.answers]))
+
+    # def get(self, question):
+    #     rv = []
+    #     if question.type.family == 'open_ended':
+    #         if question.type.subtype == 'multi':
+    #             for subanswer in sorted(question.answers,
+    #                                     key=lambda x: x.position):
+    #                 rv.append((subanswer.text,
+    #                           self[subanswer.answer_id]))
+    #         elif question.type.subtype in ('essay', 'single'):
+    #             assert len(self.answers) == 1
+    #             assert self.answers[0].row == '0'
+    #             rv.append(self.answers[0].text)
+    #         else:
+    #             raise Exception('Unformattable answer')
+    #     else:
+    #         for ans in self.answers:
+    #             answer = question[ans.row]
+    #             if answer.type == 'other':
+    #                 rv.append("{0}: {1}".format(answer.text, ans.text))
+    #             elif answer.type == 'row':
+    #                 rv.append(answer.text)
+    #             else:
+    #                 raise Exception('Unformattable answer')
+    #     return rv
 
 class SurveyQuestionAnswerResponse:
     def __init__(self, question, response):
@@ -292,7 +315,7 @@ class SurveyQuestionAnswerResponse:
             # Nothing to do for these
             return
         if self.type.family == 'open_ended':
-            if self.type.subtype == 'multi':
+            if self.type.subtype in ('multi','numerical'):
                # open_ended/multi questions have "sub questions"
                # e.g. a), b), c)
                # This should already be sorted, but we'll do it anyway
@@ -311,11 +334,10 @@ class SurveyQuestionAnswerResponse:
                                             "non-zero row.")
                 self.answer = self._response.answers[0].text
             else:
-                # TODO: 'numeric' type?
-                raise Exception("Don't know how to parse response")
+                raise SurveyMonkeyException(
+                    "Unknown open_ended subtype {0} question id {1}".format(
+                        self.type.subtype, self._question.question_id))
         elif self.type.family in ('single_choice', 'multiple_choice'):
-            # TODO: Possibly only for non-'horiz' subtypes
-            # Consider a generic "get id" instead of hardcoding 'row'
             self.answer = []
             for ans in self._response.answers:
                 # Each response here should have a 'row', and possibly
@@ -328,15 +350,22 @@ class SurveyQuestionAnswerResponse:
                 elif answer.type == 'row':
                     self.answer.append(answer.text)
                 else:
-                    raise Exception('Unformattable answer')
+                    raise SurveyMonkeyException(
+                        "Unknown answer type {0} for question id {1})".format(
+                            self.type, self._question.question_id))
+        elif self.type.family in ('matrix'):
+            for ans in self._response.answers:
+                # TODO: weight?
+                self.subquestions.append((self._question[ans.row].text,
+                                          self._question[ans.col].text))
         else:
-            raise Exception("Unformattable answer")
+            raise SurveyMonkeyException(
+                "Can't parse {0} question id {1}".format(
+                    self.type, self._question.question_id))
 
     def __repr__(self):
-        rv = u"Question({0})\n  {1}\n  {2}\n  {3}".format(self.heading,
-                                                          self.type,
-                                                          self.subquestions,
-                                                          self.answer)
+        rv = u"Question({0}, {1}\n  {2}\n  {3}".format(
+            self.type, self.heading, self.subquestions, self.answer)
         return rv.encode("utf-8")
 
 class SurveyMonkey:
@@ -371,15 +400,15 @@ class SurveyMonkey:
         logger.debug("Making request to %s, data=%s", url, str(data))
         response = self.client.post(url, data=json.dumps(data))
         # TODO: Better avoidance of rate limiting
-        time.sleep(0.1)
+        time.sleep(0.4)
         if not response:
             raise SurveyMonkeyError('Bad response: ' + repr(response))
             logger.error("Response code: {0} text: {1}".format(
-                    response.status_code, response.text)
+                    response.status_code, response.text))
             response.raise_for_status()
         try:
             # response_json = response.json(object_hook=Struct)
-            # TODO: Hack until we have requests 1.2
+            # TODO: Hack until we have requests 1.2.0
             response_json = json.loads(json.dumps(response.json()),
                                        object_hook=Struct)
         except JSONDecodeError as e:

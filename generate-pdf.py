@@ -77,7 +77,7 @@ class TechDiagnosticPDF(SimpleDocTemplate):
                                 'Phone Number (cell phone preferred):'],
                                }
 
-    _skip_page_numbers = ('Basic Information',
+    _skip_question_numbers = ('Basic Information',
                           )
 
     def __init__(self, filename):
@@ -102,8 +102,6 @@ class TechDiagnosticPDF(SimpleDocTemplate):
     def _scoring_table(self, canvas, data, **kwargs):
         row_height = kwargs.get('row_height', None)
         col_width = kwargs.get('col_width', None)
-        assert row_height is not None
-        assert col_width is not None
         x_offset = kwargs.get('x_offset', 0.5 * units.inch)
         y_offset = kwargs.get('y_offset', 0.5 * units.inch)
         align = kwargs.get('align', 'left')
@@ -173,18 +171,17 @@ class TechDiagnosticPDF(SimpleDocTemplate):
     def can_inline_question(self, question):
         if ((question.type.subtype == 'single') and
             (self._cur_page_title in self._inline_single_answers) and
+            self._will_fit_inline(question.heading,
+                                  'InlineQuestion') and
             (question.heading in 
              self._inline_single_answers[self._cur_page_title])):
             return True
         return False
 
-    def skip_page_numbers(self):
-        return 
-
     def add_question_response(self, response):
         question_heading = u'{0}. {1}'.format(response.position,
                                               response.heading)
-        if self._cur_page_title in self._skip_page_numbers:
+        if self._cur_page_title in self._skip_question_numbers:
             question_heading = response.heading
         if not response:
             pdf.add_paragraph(question_heading, style='Question')
