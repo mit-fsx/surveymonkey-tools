@@ -169,7 +169,7 @@ class TechDiagnosticPDF(SimpleDocTemplate):
         self.add_paragraph(text, style='Title')
 
     def can_inline_question(self, question):
-        if ((question.type.subtype == 'single') and
+        if ((question.type == 'open_ended/single') and
             (self._cur_page_title in self._inline_single_answers) and
             self._will_fit_inline(question.heading,
                                   'InlineQuestion') and
@@ -253,8 +253,8 @@ logger.addHandler(debug_handler)
 
 config = surveymonkey.Config.load()
 monkey = surveymonkey.SurveyMonkey(config.get_token(),
-                      config.app.api_key,
-                      config.api.base)
+                      config.app.api_key)
+
 survey_id='20816427'
 respondent_id='3122352155'
 respondent_id='2803655571'
