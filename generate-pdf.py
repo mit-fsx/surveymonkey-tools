@@ -187,6 +187,7 @@ class TechDiagnosticPDF(SimpleDocTemplate):
             pdf.add_paragraph(question_heading, style='Question')
             pdf.add_paragraph('(no response)', style='Answer')
             return
+        if response.has
         if response.type.family == "open_ended":
             if response.type.subtype == "multi":
                 self.add_paragraph(question_heading, style='Question')
