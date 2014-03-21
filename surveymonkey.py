@@ -365,17 +365,13 @@ class ParsedQuestionResponse:
         self._response = response
         self.heading = question.heading
         self.position = question.position
-        self.subquestions = []
-        self.answer = None
-        self.other = None
+        self.answer = []
         self.type = question.type
         if response is not None:
             self._parse_response()
 
     def __nonzero__(self):
-        return ((self.answer is not None) or
-                (self.other is not None) or
-                (len(self.subquestions) != 0))
+        return len(self.answer) > 0
 
     def _parse_response(self):
         if self.type.family == 'presentation':
@@ -390,7 +386,7 @@ class ParsedQuestionResponse:
                                         key=lambda x: x.position):
                     # Append a tuple of the subanswer text, and the response for
                     # that answer_id (which may be None
-                    self.subquestions.append(
+                    self.answer.append(
                         (subanswer.text, self._response[subanswer.answer_id]))
             elif self.type.subtype in ('essay', 'single'):
                 if len(self._response.answers) > 1:
@@ -399,13 +395,13 @@ class ParsedQuestionResponse:
                 if self._response.answers[0].row != '0':
                     raise SurveyMonkeyError("Found single response with "
                                             "non-zero row.")
-                self.answer = self._response.answers[0].text
+                self.answer.append(self._response.answers[0].text)
             else:
                 raise SurveyMonkeyException(
                     "Unknown open_ended subtype {0} question id {1}".format(
                         self.type.subtype, self._question.question_id))
         elif self.type.family in ('single_choice', 'multiple_choice'):
-            self.answer = []
+            other = None
             for ans in self._response.answers:
                 # Each response here should have a 'row', and possibly
                 # a 'text' attribute.  We must match the row with
@@ -413,26 +409,29 @@ class ParsedQuestionResponse:
                 # text of that choice was.
                 answer = self._question[ans.row]
                 if answer.type == 'other':
-                    self.other = (answer.text, ans.text)
+                    # Save to append at end
+                    other = (answer.text, ans.text)
                 elif answer.type == 'row':
                     self.answer.append(answer.text)
                 else:
                     raise SurveyMonkeyException(
                         "Unknown answer type {0} for question id {1})".format(
                             self.type, self._question.question_id))
+            if other is not None:
+                self.answer.append(other)
         elif self.type.family in ('matrix'):
             for ans in self._response.answers:
                 # TODO: weight?
-                self.subquestions.append((self._question[ans.row].text,
-                                          self._question[ans.col].text))
+                self.answer.append((self._question[ans.row].text,
+                                    self._question[ans.col].text))
         else:
             raise SurveyMonkeyException(
                 "Can't parse {0} question id {1}".format(
                     self.type, self._question.question_id))
 
     def __repr__(self):
-        rv = u"ParsedQuestionResponse({0}, {1}\n  {2}\n  {3}".format(
-            self.type, self.heading, self.subquestions, self.answer)
+        rv = u"ParsedQuestionResponse({0}, {1}\n  {2}".format(
+            self.type, self.heading, self.answer)
         return rv.encode("utf-8")
 
 class SurveyMonkey:
