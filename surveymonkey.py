@@ -5,16 +5,46 @@ import sys
 if sys.hexversion < 0x2060000:
     raise Exception("Python 2.6 required")
 
+import calendar
 import json
 import logging
 import time
 import re
+import urllib
 
+from datetime import datetime
 from distutils.version import StrictVersion
 from simplejson.decoder import JSONDecodeError
 from xml.sax import saxutils
 
+import pytz
 import requests
+
+class DateTime:
+    local_tz = pytz.timezone('America/New_York')
+    utc_tz = pytz.utc
+    default_fmt = '%Y-%m-%d %H:%M:%S'
+
+    def __init__(self, datestring, **kwargs):
+        fmt = kwargs.get('fmt', self.default_fmt)
+        is_local = kwargs.get('is_local', False)
+        self.dt = datetime.strptime(datestring, fmt).replace(
+            tzinfo=self.local_tz if is_local else self.utc_tz)
+        
+    def to_utc(self, txt=False):
+        rv = self.utc_tz.normalize(self.dt.astimezone(self.utc_tz))
+        if txt:
+            return rv.strftime(self.default_fmt)
+        else:
+            return rv
+
+    def to_local(self, txt=False):
+        rv = self.local_tz.normalize(self.dt.astimezone(self.local_tz))
+        if txt:
+            return rv.strftime(self.default_fmt)
+        else:
+            return rv
+
 
 logger = logging.getLogger('surveymonkey')
 
@@ -32,6 +62,9 @@ class Struct:
         if isinstance(from_obj, Struct):
             from_obj = from_obj.__dict__
         self.__dict__.update(from_obj)
+
+    def as_dict(self):
+        return self.__dict__
 
     def __repr__(self):
         return "{0}({1})".format(self.__class__.__name__,
@@ -98,8 +131,11 @@ class RespondentList(Struct):
         self.pages=[self.page]
 
     def __getitem__(self, key):
-        return self.respondents[key]
-
+        if isinstance(key, int):
+            return self.respondents[key]
+        else:
+            return {r.respondent_id: r for r in self.respondents}.get(key,
+                                                                      None)
     def __len__(self):
         return len(self.respondents)
 
@@ -350,12 +386,7 @@ class ParsedQuestionResponse:
     Some knowledge of the type is required by the formatter.
     Attributes:
     - answer: The response, if the question is not a multiple-answer question.
-              None, a value, or a list of values.
-    - subquestions: The prompts and responses for the "sub questions",
-                    if a multi-answer question
-    - other: If the question had an 'other' answer, and a response was given,
-             this is a tuple of (answer, response) where 'answer' is the
-             text of the 'Other' answer
+              A list of values and/or tuples
     - type: The SurveyQuestionType of the question.
     """
     def __init__(self, question, response):
@@ -369,6 +400,12 @@ class ParsedQuestionResponse:
         self.type = question.type
         if response is not None:
             self._parse_response()
+
+    def __str__(self, no_val="(n/a)"):
+        if not self:
+            return no_val
+        else:
+            return str(self.answer[0])
 
     def __nonzero__(self):
         return len(self.answer) > 0
@@ -433,6 +470,51 @@ class ParsedQuestionResponse:
         rv = u"ParsedQuestionResponse({0}, {1}\n  {2}".format(
             self.type, self.heading, self.answer)
         return rv.encode("utf-8")
+
+class OAuth:
+    AUTH_ENDPOINT = '/oauth/authorize'
+    TOKEN_ENDPOINT = '/oauth/token'
+
+    def __init__(self, **kwargs):
+        base_uri = kwargs.get('base_uri', SurveyMonkey._default_base_uri)
+        auth_endpoint = kwargs.get('auth_endpoint', OAuth.AUTH_ENDPOINT)
+        token_endpoint = kwargs.get('token_endpoint', OAuth.TOKEN_ENDPOINT)
+        self.auth_uri = "{0}{1}?{2}".format(base_uri, auth_endpoint,
+                                            urllib.urlencode(
+                {'redirect_uri': kwargs['redirect_uri'],
+                 'client_id': kwargs['client_id'],
+                 'api_key': kwargs['api_key'],
+                 'response_type': 'code'}))
+
+        # Note the URI we POST to has the api_key as part of the
+        # query string.  It cannot be encoded in POST data.
+        self.token_uri ="{0}{1}?api_key={2}".format(base_uri,
+                                                    token_endpoint,
+                                                    kwargs['api_key'])
+        self.token_request_data = {
+            'client_secret': kwargs['client_secret'],
+            'redirect_uri': kwargs['redirect_uri'],
+            'client_id': kwargs['client_id'],
+            'grant_type': 'authorization_code'}
+    
+    def get_and_save_token(self, authorization_code, token_file):
+        postdata = {'code': authorization_code}
+        postdata.update(self.token_request_data)
+        token_response = requests.post(self.token_uri,
+                                       data=postdata, timeout=0.01)
+        try:
+            token_json = token_response.json()
+        except ValueError:
+            raise SurveyMonkeyError("Bad response: {0}".format(token_response))
+        if 'access_token' not in token_json:
+            raise SurveyMonkeyError(token_json.get('error_description',
+                                                   'Unknown error'))
+        try:
+            with open(token_file, 'w') as f:
+                f.write(token_json['access_token'])
+        except (IOError, KeyError) as e:
+            raise SurveyMonkeyError(
+                "Failed to write token to file: {0}".format(e))
 
 class SurveyMonkey:
     """
@@ -506,14 +588,15 @@ class SurveyMonkey:
                                      {'survey_id': survey_id})
         return SurveyDetails(details)
 
-    def get_survey_responses(self, survey_id, *respondents):
+    def get_survey_responses(self, survey_id, *respondents, **kwargs):
         """Get responses to a survey, given one or more respondents"""
         if len(respondents) < 1:
             raise ValueError("One or more respondents required")
+        respondent_ids = respondents if kwargs.get('by_id', False) else [r.respondent_id for r in respondents]
         postdata = {'survey_id': survey_id,
-                    'respondent_ids' : respondents}
-        return {r.respondent_id: SurveyResponse(r) for r in
-                self._make_request('surveys.get_responses', postdata)}
+                    'respondent_ids': respondent_ids}
+        return [SurveyResponse(r) for r in
+                self._make_request('surveys.get_responses', postdata)]
 
     def get_survey_list(self, fields=SurveyInfo._fields, **kwargs):
         """Get a list of all surveys"""
