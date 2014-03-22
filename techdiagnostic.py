@@ -22,12 +22,12 @@ class StyleSheet(dict):
                                               alignment=enums.TA_CENTER,
                                               fontName='Helvetica-Bold',
                                               fontSize=18, leading=22,
-                                              spaceAfter=6)
+                                              spaceAfter=8)
         self['Question'] = styles.ParagraphStyle('Question',
                                                  parent=self['Normal'],
                                                  fontName='Helvetica-Bold',
                                                  fontSize=12, leading=12,
-                                                 spaceBefore=6, spaceAfter=4)
+                                                 spaceBefore=8, spaceAfter=4)
         self['Subquestion'] = styles.ParagraphStyle('Subquestion',
                                                     parent=self['Question'],
                                                     fontName='Helvetica-Bold',
@@ -73,36 +73,37 @@ class StyleSheet(dict):
                                                       spaceBefore=0)
 
 
+class Section:
+    def __init__(self, title, **kwargs):
+        self.title = title
+        self.inline_single_answers = []
+        self.skip_question_numbers = False
+        self.skip_footer = False
+
+    def __repr__(self):
+        return "Section({0},numbers={1},footer={2})\n  {3}".format(
+            self.title,
+            self.skip_question_numbers,
+            self.skip_footer,
+            self.inline_single_answers)
+
 class SectionStart(NullDraw):
     def __init__(self, section, callback):
         NullDraw.__init__(self)
-        self._callback = callback
         self._section = section
+        self._callback = callback
 
     def draw(self):
-        self._callback(self._section, self.canv)
-        NullDraw.draw(self)
+        self._callback(self._section)
 
 class PDF(SimpleDocTemplate):
-    _inline_single_answers = { 'Basic Information': 
-                               ['Name:',
-                                'MIT email address:',
-                                'Phone Number (cell phone preferred):'],
-                               }
-
-    _skip_question_numbers = ('Basic Information',
-                          )
-
     def __init__(self, filename):
         # Sigh.  SimpleDocTemplate is an old-style class
         SimpleDocTemplate.__init__(self, filename,
                                    pagesize=pagesizes.letter)
         self.stylesheet = StyleSheet()
         self.header_lines = []
-        self._this_section = None
-        self._cur_page_title = 'Untitled'
-        # This way we can use list indicies, since there's no Page 0
-        self._pages = [None]
+        self._this_section = Section('Untitled')
         # Start with a Spacer for the header on the first page
         self.story = [Spacer(1, 1.5 * units.inch)]
         self.leftMargin = 0.5 * units.inch
@@ -164,55 +165,87 @@ class PDF(SimpleDocTemplate):
 
     def _footer(self, canvas, _):
         # This gets called at the start of a page, not the end.
-        # Design new flowable for footer
-        if self.page == 1:
-            return
-#        print self._this_section, "rendering the footer of page", self.page
-#        print self.page, self._pages
         canvas.saveState()
         canvas.setFont('Helvetica', 10)
-        canvas.drawRightString(self.page_w - (0.75 * units.inch),
-                               0.5 * units.inch,
-#                               u'"{0}" score: '.format(self._pages[self.page]))
-                               u'"{0}" score: '.format(self._this_section))
-        canvas.line(self.page_w - (0.75 * units.inch),
-                    0.5 * units.inch,
-                    self.page_w - (0.5 * units.inch),
-                    0.5 * units.inch)
-
         canvas.drawString(0.5 * units.inch,
                           0.5 * units.inch,
                           'Page {0}'.format(self.page))
         canvas.restoreState()
 
-    def set_section_title(self, title, canvas):
-        print "setting new section title", title, self.page
-        self._this_section = title
-        self._footer(canvas, None)
+    def _add_section_footer(self, end_section=False):
+        if self._this_section.skip_footer:
+            return
+        canvas = self.canv
+        canvas.saveState()
+        y = 0.5 * units.inch
+        if not end_section:
+            x = self.page_w - (0.5 * units.inch)
+            font = ('Helvetica-Oblique', 10)
+            canvas.setFont(*font)
+            canvas.drawRightString(x, y,
+                                   '(section continues on next page)')
+        else:
+            x = self.page_w - (0.75 * units.inch)
+            font = ('Helvetica', 10)
+            canvas.setFont(*font)
+            canvas.drawRightString(x, y, ' score: ')
+            x -= stringWidth(' score: ', *font)
+            font = ('Helvetica-Oblique', 10)
+            canvas.setFont(*font)
+            canvas.drawRightString(x, y, self._this_section.title)
+            canvas.line(self.page_w - (0.75 * units.inch),
+                        y,
+                        self.page_w - (0.5 * units.inch),
+                        y)
+        canvas.restoreState()
+        self._footer_printed = True
+
+    def handle_pageBreak(self):
+        self._add_section_footer(end_section=True)
+        SimpleDocTemplate.handle_pageBreak(self)
+
+    def handle_pageBegin(self):
+        self._footer_printed = False
+        SimpleDocTemplate.handle_pageBegin(self)
+
+    def handle_pageEnd(self):
+        if not self._footer_printed:
+            self._add_section_footer()
+        SimpleDocTemplate.handle_pageEnd(self)
+
+    def _set_current_section(self, section):
+        self._this_section = section
+
+    def add_section(self, section):
+        self._this_section = section
+        self.story.append(SectionStart(section,
+                                       self._set_current_section))
 
     def add_page_title(self, text):
-        self.story.append(SectionStart(text, self.set_section_title))
-        self._cur_page_title = text
         self.add_paragraph(text, style='Title')
 
     def can_inline_question(self, question):
         if ((question.type == 'open_ended/single') and
-            (self._cur_page_title in self._inline_single_answers) and
+            (question.heading in self._this_section.inline_single_answers) and
             self._will_fit_inline(question.heading,
-                                  'InlineQuestion') and
-            (question.heading in 
-             self._inline_single_answers[self._cur_page_title])):
+                                  'InlineQuestion')):
             return True
         return False
 
     def add_question_response(self, response):
         question_heading = u'{0}. {1}'.format(response.position,
                                               response.heading)
-        if self._cur_page_title in self._skip_question_numbers:
+        if self._this_section.skip_question_numbers:
             question_heading = response.heading
         if not response:
             self.add_paragraph(question_heading, style='Question')
-            self.add_paragraph('(no response)', style='Answer')
+            if response.subheadings() is not None:
+                [self.add_paragraph('(no response)',
+                                    style='InlineSubquestion',
+                                    bulletText=subhead) for subhead
+                 in response.subheadings()]
+            else:
+                self.add_paragraph('(no response)', style='Answer')
             return
         if self.can_inline_question(response):
             self.add_paragraph(response.answer[0], style='InlineQuestion',
@@ -248,24 +281,11 @@ class PDF(SimpleDocTemplate):
                               ]):
             self.story.append(Paragraph(txt, self.stylesheet[style], **kwargs))
 
-#     def handle_flowable(self, flowables):
-#         print flowables[0]
-#         if isinstance(flowables[0], SectionStart):
-#             print "bumping section!"
-#             self._this_section = flowables[0]._section
-#         print "--------------------"
-#         # this_flowable = flowables[0]
-#         #     self._this_section = this_flowable._section
-#         #     print "found a SectionStart"
-#         self._handle_flowable(flowables)
-# #@        self.handle_pageBreak()
-
     def add_page_break(self):
-#        print "Adding a page break", self._cur_page_title
-        self._pages.append(self._cur_page_title)
         self.story.append(PageBreak())
 
     def save(self):
         self.build(self.story,
                    onFirstPage=self._header,
                    onLaterPages=self._footer)
+
