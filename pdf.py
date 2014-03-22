@@ -95,8 +95,9 @@ for page in details.pages:
     pdf.add_page_break()
 if debug_mode:
     print "Successfully generated", pdf.filename
+    print "Would have sent filename of", filename
 else:
-    print "Content-disposition: inline;filename={0}"
+    print "Content-disposition: inline;filename={0}".format(filename)
     print "Content-type: application/pdf\n".format(filename)
 pdf.save()
 sys.exit(0)
