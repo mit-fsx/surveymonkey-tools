@@ -401,6 +401,15 @@ class ParsedQuestionResponse:
         if response is not None:
             self._parse_response()
 
+    def subheadings(self):
+        if self.type == 'open_ended/multi':
+            return [subanswer.text for subanswer in
+                    sorted(self._question.answers,
+                           key=lambda x: x.position)]
+        else:
+            return None
+            
+
     def __str__(self, no_val="(n/a)"):
         if not self:
             return no_val
