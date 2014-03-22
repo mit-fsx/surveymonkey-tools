@@ -288,4 +288,3 @@ class PDF(SimpleDocTemplate):
         self.build(self.story,
                    onFirstPage=self._header,
                    onLaterPages=self._footer)
-
