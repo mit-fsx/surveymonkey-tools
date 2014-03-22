@@ -9,6 +9,7 @@ import time
 import logging
 import subprocess
 
+sys.path.append('/mit/helpdesk/web_scripts/surveymonkey/lib')
 import surveymonkey
 
 # What questions do we want from the survey?

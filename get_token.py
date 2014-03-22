@@ -8,6 +8,7 @@ import os
 import sys
 cgitb.enable()
 
+sys.path.append(os.path.join(os.getcwd(), 'lib'))
 import surveymonkey
 
 config = surveymonkey.Config.load()

@@ -9,6 +9,7 @@ import time
 import urllib
 cgitb.enable()
 
+sys.path.append(os.path.join(os.getcwd(), 'lib'))
 import surveymonkey
 import techdiagnostic
 

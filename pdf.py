@@ -13,6 +13,7 @@ debug_mode = 'GATEWAY_INTERFACE' not in os.environ
 if not debug_mode:
     cgitb.enable()
 
+sys.path.append(os.path.join(os.getcwd(), 'lib'))
 import surveymonkey
 import techdiagnostic
 
